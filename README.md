@@ -6,6 +6,8 @@ A separate Vercel project that accepts a standard authenticated MCP connection a
 MCP client -- HTTPS --> Vercel /api/mcp -- encrypted HTTP or HTTPS --> relay-agent -- local execution
 ```
 
+中文文档见 [README.zh-CN.md](./README.zh-CN.md).
+
 The Vercel-to-agent body is a private protocol: AES-256-GCM encryption plus HMAC-SHA256 authentication, separate request/response keys derived from `RELAY_SHARED_SECRET`, 60-second timestamp validation, and nonce replay rejection. The remote hop does not need an SSL certificate. Its HTTP headers, endpoint address, timing, and payload size remain visible to the network, so use a private tunnel/firewall where possible. This is application-layer protection, not a replacement for network isolation.
 
 ## Security model
