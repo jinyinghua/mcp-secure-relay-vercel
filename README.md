@@ -19,7 +19,7 @@ The Vercel-to-agent body is a private protocol: AES-256-GCM encryption plus HMAC
 - Writes are disabled by default and use a same-directory temporary file followed by atomic rename when enabled.
 - The agent has independent read/write/output/timeout limits. Vercel limits tool responses again.
 - Every attempted operation is written to Redis before dispatch and completed afterward. It stores client key fingerprint, operation, target, byte counts, timing, status, and error code. It never stores API keys, file contents, or command output.
-- Redis REST configuration is required for execution. If pre-dispatch audit storage is unavailable, no operation is sent to the remote server.
+- Audit storage is required for execution. `REDIS_URL` takes precedence and supports native Redis/Redis Cloud `rediss://` connections; Upstash REST remains available as a fallback. If the selected backend is unavailable before dispatch, no operation is sent to the remote server.
 
 ## Deploy Vercel
 
@@ -31,7 +31,7 @@ openssl rand -base64 48  # MCP_API_KEYS and AUDIT_API_KEY
 openssl rand -base64 32  # RELAY_SHARED_SECRET and agent shared_secret
 ```
 
-3. Provision Redis with an HTTP REST API, such as Upstash Redis from the Vercel Marketplace. Set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`.
+3. Prefer Redis Cloud by setting its `REDIS_URL=rediss://...` connection string; the project connects through the native TLS Redis protocol. Alternatively, omit `REDIS_URL` and configure Upstash Redis REST with `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`.
 4. Deploy with `vercel --prod`, then set `NEXT_PUBLIC_APP_URL` to the resulting HTTPS URL and redeploy.
 
 The MCP endpoint is `https://YOUR_PROJECT.vercel.app/api/mcp`. Configure a standard Streamable HTTP MCP client with `Authorization: Bearer YOUR_MCP_KEY`.

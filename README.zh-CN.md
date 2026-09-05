@@ -19,7 +19,7 @@ Vercel 到 agent 的链路使用项目自带的加密：AES-256-GCM 加密 + HMA
 - 写入默认关闭；开启后采用同目录临时文件 + 原子改名，不会留下半写文件。
 - Agent 自带独立的读/写/输出/超时上限，Vercel 端会对工具响应再次截断。
 - 每次操作在派发前写入 Redis、结束后更新状态。审计记录包含客户端 key 指纹、操作类型、目标、字节数、耗时、状态和错误码；不包含 API Key、文件内容或命令输出。
-- Redis REST 配置为执行前置条件：审计写入失败时操作不会下发到远端。
+- 审计存储为执行前置条件：优先使用 `REDIS_URL` 直连 Redis（Redis Cloud 可用 `rediss://`），未配置时兼容 Upstash REST；任一已选后端写入失败时操作不会下发到远端。
 
 ## 部署 Vercel
 
@@ -31,7 +31,7 @@ openssl rand -base64 48  # MCP_API_KEYS、AUDIT_API_KEY
 openssl rand -base64 32  # RELAY_SHARED_SECRET、agent 的 shared_secret
 ```
 
-3. 准备一个带 HTTP REST 接口的 Redis，例如 Vercel Marketplace 的 Upstash Redis，填入 `UPSTASH_REDIS_REST_URL` 和 `UPSTASH_REDIS_REST_TOKEN`。
+3. 推荐使用 Redis Cloud：填入其控制台提供的 `REDIS_URL=rediss://...` 连接串，项目会直接使用 TLS Redis 协议。也可不填 `REDIS_URL`，改用 Vercel Marketplace 的 Upstash Redis，并填入 `UPSTASH_REDIS_REST_URL` 与 `UPSTASH_REDIS_REST_TOKEN`。
 4. `vercel --prod` 部署后，把 `NEXT_PUBLIC_APP_URL` 改为生成的 HTTPS URL 并重新部署。
 
 MCP 端点为 `https://你的项目.vercel.app/api/mcp`。标准 Streamable HTTP MCP 客户端配置：
