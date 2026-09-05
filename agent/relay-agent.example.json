@@ -1,0 +1,22 @@
+{
+  "listen_addr": "127.0.0.1:8787",
+  "shared_secret": "PASTE_THE_SAME_BASE64_32_BYTE_SECRET_AS_VERCEL",
+  "root_dir": "/srv/controlled-workspace",
+  "allow_file_write": false,
+  "max_read_bytes": 65536,
+  "max_write_bytes": 65536,
+  "max_output_bytes": 65536,
+  "max_clock_skew_seconds": 60,
+  "commands": {
+    "service_status": {
+      "executable": "/usr/bin/systemctl",
+      "args": ["is-active", "my-service"],
+      "timeout_seconds": 5
+    },
+    "app_version": {
+      "executable": "/srv/controlled-workspace/bin/app-version",
+      "args": [],
+      "timeout_seconds": 5
+    }
+  }
+}
