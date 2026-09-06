@@ -14,7 +14,8 @@ export interface Envelope {
 
 export interface RelayRequest {
   operation: 'command' | 'read_file' | 'write_file';
-  commandId?: string;
+  command?: string;
+  timeoutSeconds?: number;
   path?: string;
   contentBase64?: string;
   encoding?: 'utf8' | 'base64';

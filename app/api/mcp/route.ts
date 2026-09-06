@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { z } from 'zod';
 
 export const runtime = 'nodejs';
@@ -8,11 +8,17 @@ import { verifyMcpKey } from '@/lib/auth';
 import { invokeRelay, type RelayRequest, type RelayResponse } from '@/lib/relay-protocol';
 
 const MAX_WRITE_BYTES = 64 * 1024;
+const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_TOOL_RESPONSE_BYTES = Math.min(Math.max(Number(process.env.MAX_TOOL_RESPONSE_BYTES || 65_536), 1_024), 256 * 1024);
 
 function text(bytes: Buffer): string {
   if (bytes.length <= MAX_TOOL_RESPONSE_BYTES) return bytes.toString('utf8');
   return `${bytes.subarray(0, MAX_TOOL_RESPONSE_BYTES).toString('utf8')}\n[output truncated by relay]`;
+}
+
+function commandAuditTarget(command: string): string {
+  // Do not persist potentially sensitive command text in the 14-day audit store.
+  return `shell:sha256:${createHash('sha256').update(command).digest('hex').slice(0, 24)}`;
 }
 
 async function relay(operation: RelayRequest, target: string, inputBytes = 0): Promise<RelayResponse> {
@@ -61,11 +67,18 @@ const handler = createMcpHandler(
   (server) => {
     server.tool(
       'execute_command',
-      'Run one fixed command profile configured on the remote relay. Arbitrary commands and shell syntax are never accepted.',
-      { command_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/).describe('An enabled remote command profile ID') },
-      async ({ command_id }, { authInfo }) => {
+      'Execute a shell command on the remote relay as its configured operating-system user. The default working directory is the remote root_dir. The caller must be fully trusted: this tool intentionally supports shell syntax, pipelines, redirects, and arbitrary command arguments.',
+      {
+        command: z.string().min(1).max(MAX_COMMAND_BYTES).describe('Shell command to execute on the remote server'),
+        timeout_seconds: z.number().int().min(1).max(25).optional().describe('Optional execution timeout; the remote policy may impose a lower maximum')
+      },
+      async ({ command, timeout_seconds }, { authInfo }) => {
         try {
-          const response = await relay({ operation: 'command', commandId: command_id, callerId: authInfo?.clientId || 'unknown' }, command_id);
+          const response = await relay(
+            { operation: 'command', command, timeoutSeconds: timeout_seconds, callerId: authInfo?.clientId || 'unknown' },
+            commandAuditTarget(command),
+            Buffer.byteLength(command)
+          );
           if (!response.ok) return remoteFailure(response);
           const result = response.result || {};
           const stdout = typeof result.stdoutBase64 === 'string' ? text(Buffer.from(result.stdoutBase64, 'base64')) : '';
@@ -79,7 +92,7 @@ const handler = createMcpHandler(
 
     server.tool(
       'read_file',
-      'Read a regular file below the remote relay allowlisted root. Paths must be relative and cannot traverse symbolic links.',
+      'Read a regular file below the remote relay root_dir. Paths must be relative and cannot traverse symbolic links.',
       {
         path: z.string().min(1).max(1024).describe('Relative path below the configured remote root'),
         encoding: z.enum(['utf8', 'base64']).default('utf8').describe('Return text or base64')
@@ -99,7 +112,7 @@ const handler = createMcpHandler(
 
     server.tool(
       'write_file',
-      'Atomically write a UTF-8 text file below the remote relay allowlisted root. Disabled unless the remote policy explicitly enables writes.',
+      'Atomically write a UTF-8 text file below the remote relay root_dir. Disabled unless the remote policy explicitly enables writes.',
       {
         path: z.string().min(1).max(1024).describe('Relative path below the configured remote root'),
         content: z.string().max(MAX_WRITE_BYTES).describe('UTF-8 text content, limited to 64 KiB')

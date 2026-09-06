@@ -1,6 +1,6 @@
 # MCP Secure Relay for Vercel
 
-A separate Vercel project that accepts a standard authenticated MCP connection and relays only three controlled operations to a lightweight remote executable.
+A separate Vercel project that accepts a standard authenticated MCP connection and relays shell commands and file operations to a lightweight remote executable.
 
 ```
 MCP client -- HTTPS --> Vercel /api/mcp -- encrypted HTTP or HTTPS --> relay-agent -- local execution
@@ -14,10 +14,10 @@ The Vercel-to-agent body is a private protocol: AES-256-GCM encryption plus HMAC
 
 - `MCP_API_KEYS` is mandatory. The relay rejects every MCP request if it is unset.
 - The agent has a separate 32-byte shared secret and rejects tampered, stale, or replayed envelopes.
-- `execute_command` accepts only a remote `command_id`. Each ID maps to an exact executable and fixed argument list in the agent config. Shells (`sh`, `bash`) are prohibited.
+- `execute_command` intentionally accepts arbitrary shell commands, pipelines, redirects, and arguments, running as the agent operating-system user. Issue MCP API keys only to fully trusted clients.
 - `read_file` and `write_file` only accept relative paths below `root_dir`. Absolute paths, `..`, symbolic links, non-regular files, and missing parent directories are rejected.
 - Writes are disabled by default and use a same-directory temporary file followed by atomic rename when enabled.
-- The agent has independent read/write/output/timeout limits. Vercel limits tool responses again.
+- The agent has independent read/write/output/command-timeout limits. Vercel limits tool responses again.
 - Every attempted operation is written to Redis before dispatch and completed afterward. It stores client key fingerprint, operation, target, byte counts, timing, status, and error code. It never stores API keys, file contents, or command output.
 - Audit storage is required for execution. `REDIS_URL` takes precedence and supports native Redis/Redis Cloud `rediss://` connections; Upstash REST remains available as a fallback. If the selected backend is unavailable before dispatch, no operation is sent to the remote server.
 
@@ -56,13 +56,21 @@ cd agent
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o relay-agent .
 install -m 700 relay-agent /usr/local/bin/relay-agent
 install -m 600 relay-agent.example.json /etc/relay-agent.json
-# Edit /etc/relay-agent.json: shared_secret, root_dir, and fixed command profiles.
+# Edit /etc/relay-agent.json: shared_secret, root_dir, and command limits.
 /usr/local/bin/relay-agent -config /etc/relay-agent.json
 ```
 
 The sample binds `127.0.0.1:8787`; keep that default and expose it through an existing private tunnel or reverse proxy. If Vercel must call the agent directly, `REMOTE_AGENT_URL` must be reachable from the public Internet and the host firewall should restrict access where possible. The agent authenticates every request cryptographically, even when reachable through plain HTTP.
 
-To permit controlled writes, set `allow_file_write` to `true` only after setting a narrow `root_dir`. The agent will not create missing directories.
+Shell commands run with `root_dir` as their default working directory; `root_dir` remains the path boundary for `read_file` and `write_file`. The example enables writes; set `allow_file_write` to `false` if you only need command execution. The agent will not create missing directories for `write_file`.
+
+## Arbitrary command execution and privileges
+
+As of this version, `execute_command` accepts a `command` string instead of the former `command_id`. The agent runs `/bin/sh -lc`, supporting pipelines, redirects, script fragments, and arbitrary arguments; `root_dir` is its default working directory.
+
+This makes an MCP API key a high-privilege credential: a connected client can execute any command available to the `mcp-relay` operating-system user. System package installation additionally requires sudo. Giving `mcp-relay` `NOPASSWD: ALL` makes an MCP client effectively root on the server; encryption and auditing do not eliminate that risk.
+
+`max_command_seconds` is the agent-enforced hard limit, currently capped at 25 seconds to fit Vercel function limits. Clients may request a shorter `timeout_seconds`, but cannot exceed the remote configuration. Command text is not stored in the 14-day audit database; it records only a SHA-256 fingerprint, status, timing, and byte counts.
 
 ## Audit access
 
@@ -84,4 +92,4 @@ npm run build
 cd agent && go test ./...
 ```
 
-Before production use, test denied command IDs, `../` paths, symlink paths, oversize files, disabled writes, expired envelopes, and Redis unavailability. Run the agent under a dedicated unprivileged OS account with a minimal `root_dir`; the project cannot safely compensate for an over-permissive operating-system account.
+Before production use, test shell execution, command timeouts, `../` paths, symlink paths, oversize files, expired envelopes, and Redis unavailability. Run the agent under a dedicated OS account: every resource that account can access can potentially be accessed by a trusted MCP client through commands.

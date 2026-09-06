@@ -25,12 +25,6 @@ import (
 
 const protocolVersion = 1
 
-type commandProfile struct {
-    Executable     string   `json:"executable"`
-    Args           []string `json:"args"`
-    TimeoutSeconds int      `json:"timeout_seconds"`
-}
-
 type config struct {
     ListenAddr          string                    `json:"listen_addr"`
     SharedSecret        string                    `json:"shared_secret"`
@@ -38,9 +32,9 @@ type config struct {
     AllowFileWrite      bool                      `json:"allow_file_write"`
     MaxReadBytes        int64                     `json:"max_read_bytes"`
     MaxWriteBytes       int64                     `json:"max_write_bytes"`
-    MaxOutputBytes      int                       `json:"max_output_bytes"`
-    MaxClockSkewSeconds int64                     `json:"max_clock_skew_seconds"`
-    Commands            map[string]commandProfile `json:"commands"`
+    MaxOutputBytes      int   `json:"max_output_bytes"`
+    MaxCommandSeconds   int   `json:"max_command_seconds"`
+    MaxClockSkewSeconds int64 `json:"max_clock_skew_seconds"`
 }
 
 type envelope struct {
@@ -53,9 +47,10 @@ type envelope struct {
 }
 
 type relayRequest struct {
-    Operation     string `json:"operation"`
-    CommandID     string `json:"commandId,omitempty"`
-    Path          string `json:"path,omitempty"`
+    Operation      string `json:"operation"`
+    Command        string `json:"command,omitempty"`
+    TimeoutSeconds int    `json:"timeoutSeconds,omitempty"`
+    Path           string `json:"path,omitempty"`
     ContentBase64 string `json:"contentBase64,omitempty"`
     Encoding      string `json:"encoding,omitempty"`
     CallerID      string `json:"callerId,omitempty"`
@@ -108,8 +103,10 @@ func newApp(cfg config) (*app, error) {
     if cfg.MaxReadBytes <= 0 { cfg.MaxReadBytes = 64 * 1024 }
     if cfg.MaxWriteBytes <= 0 { cfg.MaxWriteBytes = 64 * 1024 }
     if cfg.MaxOutputBytes <= 0 { cfg.MaxOutputBytes = 64 * 1024 }
+    if cfg.MaxCommandSeconds <= 0 { cfg.MaxCommandSeconds = 25 }
     if cfg.MaxClockSkewSeconds <= 0 { cfg.MaxClockSkewSeconds = 60 }
     if cfg.MaxReadBytes > 1024*1024 || cfg.MaxWriteBytes > 1024*1024 || cfg.MaxOutputBytes > 1024*1024 { return nil, errors.New("byte limits cannot exceed 1 MiB") }
+    if cfg.MaxCommandSeconds < 1 || cfg.MaxCommandSeconds > 25 { return nil, errors.New("max_command_seconds must be between 1 and 25") }
     secret, err := base64.StdEncoding.DecodeString(cfg.SharedSecret)
     if err != nil || len(secret) != 32 { return nil, errors.New("shared_secret must be base64 encoded 32 bytes") }
     if cfg.RootDir == "" { return nil, errors.New("root_dir is required") }
@@ -117,10 +114,6 @@ func newApp(cfg config) (*app, error) {
     if err != nil { return nil, fmt.Errorf("resolve root_dir: %w", err) }
     info, err := os.Stat(root)
     if err != nil || !info.IsDir() { return nil, errors.New("root_dir must be an existing directory") }
-    for id, command := range cfg.Commands {
-        if id == "" || !filepath.IsAbs(command.Executable) || command.TimeoutSeconds < 1 || command.TimeoutSeconds > 25 { return nil, fmt.Errorf("unsafe command profile %q", id) }
-        if isShell(filepath.Base(command.Executable)) { return nil, fmt.Errorf("shell profile %q is prohibited", id) }
-    }
     return &app{config: cfg, secret: secret, root: root, nonces: nonceCache{values: make(map[string]time.Time)}}, nil
 }
 
@@ -149,7 +142,7 @@ func (a *app) perform(request relayRequest) relayResponse {
     response := relayResponse{OK: false}
     switch request.Operation {
     case "command":
-        response.Result, response.Error = a.runCommand(request.CommandID)
+        response.Result, response.Error = a.runCommand(request.Command, request.TimeoutSeconds)
     case "read_file":
         response.Result, response.Error = a.readFile(request.Path)
     case "write_file":
@@ -161,12 +154,15 @@ func (a *app) perform(request relayRequest) relayResponse {
     return response
 }
 
-func (a *app) runCommand(id string) (map[string]any, *relayError) {
-    profile, ok := a.config.Commands[id]
-    if !ok { return nil, &relayError{Code: "COMMAND_DENIED", Message: "command profile is not enabled"} }
-    ctx, cancel := context.WithTimeout(context.Background(), time.Duration(profile.TimeoutSeconds)*time.Second)
+func (a *app) runCommand(command string, requestedTimeout int) (map[string]any, *relayError) {
+    if strings.TrimSpace(command) == "" { return nil, &relayError{Code: "COMMAND_INVALID", Message: "command is required"} }
+    if len(command) > 16*1024 { return nil, &relayError{Code: "COMMAND_TOO_LARGE", Message: "command exceeds 16 KiB limit"} }
+    timeoutSeconds := a.config.MaxCommandSeconds
+    if requestedTimeout > 0 && requestedTimeout < timeoutSeconds { timeoutSeconds = requestedTimeout }
+    ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
     defer cancel()
-    cmd := exec.CommandContext(ctx, profile.Executable, profile.Args...)
+    // This is intentionally a shell: trusted MCP callers may use pipes, redirects, and arbitrary arguments.
+    cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", command)
     cmd.Dir = a.root
     stdout, stderr := &limitedBuffer{limit: a.config.MaxOutputBytes}, &limitedBuffer{limit: a.config.MaxOutputBytes}
     cmd.Stdout, cmd.Stderr = stdout, stderr
@@ -176,7 +172,7 @@ func (a *app) runCommand(id string) (map[string]any, *relayError) {
         var exitError *exec.ExitError
         if errors.As(err, &exitError) { exitCode = exitError.ExitCode() } else if ctx.Err() != nil { return nil, &relayError{Code: "COMMAND_TIMEOUT", Message: "command deadline exceeded"} } else { return nil, &relayError{Code: "COMMAND_FAILED", Message: "command could not start"} }
     }
-    return map[string]any{"exitCode": exitCode, "stdoutBase64": base64.StdEncoding.EncodeToString(stdout.Bytes()), "stderrBase64": base64.StdEncoding.EncodeToString(stderr.Bytes()), "truncated": stdout.truncated || stderr.truncated}, nil
+    return map[string]any{"exitCode": exitCode, "stdoutBase64": base64.StdEncoding.EncodeToString(stdout.Bytes()), "stderrBase64": base64.StdEncoding.EncodeToString(stderr.Bytes()), "truncated": stdout.truncated || stderr.truncated, "timeoutSeconds": timeoutSeconds}, nil
 }
 
 func (a *app) readFile(path string) (map[string]any, *relayError) {
@@ -237,14 +233,6 @@ func (a *app) relativePath(value string) (string, error) {
     cleaned := filepath.Clean(value)
     if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) { return "", errors.New("path traversal denied") }
     return filepath.Join(a.root, cleaned), nil
-}
-
-func isShell(name string) bool {
-	switch name {
-	case "sh", "bash", "dash", "zsh", "fish", "ksh", "busybox", "env":
-		return true
-	}
-	return false
 }
 
 func inside(root, target string) bool {
