@@ -169,8 +169,10 @@ func (a *app) runCommand(command string, requestedTimeout int) (map[string]any, 
     err := cmd.Run()
     exitCode := 0
     if err != nil {
+        // CommandContext commonly reports an ExitError after killing the shell; timeout takes precedence.
+        if ctx.Err() != nil { return nil, &relayError{Code: "COMMAND_TIMEOUT", Message: "command deadline exceeded"} }
         var exitError *exec.ExitError
-        if errors.As(err, &exitError) { exitCode = exitError.ExitCode() } else if ctx.Err() != nil { return nil, &relayError{Code: "COMMAND_TIMEOUT", Message: "command deadline exceeded"} } else { return nil, &relayError{Code: "COMMAND_FAILED", Message: "command could not start"} }
+        if errors.As(err, &exitError) { exitCode = exitError.ExitCode() } else { return nil, &relayError{Code: "COMMAND_FAILED", Message: "command could not start"} }
     }
     return map[string]any{"exitCode": exitCode, "stdoutBase64": base64.StdEncoding.EncodeToString(stdout.Bytes()), "stderrBase64": base64.StdEncoding.EncodeToString(stderr.Bytes()), "truncated": stdout.truncated || stderr.truncated, "timeoutSeconds": timeoutSeconds}, nil
 }
